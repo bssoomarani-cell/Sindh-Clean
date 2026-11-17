@@ -3607,6 +3607,7 @@ if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",
     if(!r.ok)return [];
     const j=await r.json();return (j||[]).filter(x=>x&&x.document).map(x=>x.document);
   }
+  const SEEN={};
   window.__csLive=async function(path,method,body){
     method=method||"GET";
     const p=String(path).replace(/^\/+/,"").split("/");
@@ -3614,7 +3615,16 @@ if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",
       if(p[0]==="livecams"){
         if(p.length===1){
           const r=await fsReq(BASE+"/liveCams?pageSize=100");if(!r.ok)return null;
-          const j=await r.json(),o={};(j.documents||[]).forEach(d=>{o[d.name.split("/").pop()]=dec(d.fields);});return o;
+          const j=await r.json(),o={},now=Date.now();
+          (j.documents||[]).forEach(d=>{
+            const id=d.name.split("/").pop(),c=dec(d.fields),sn=SEEN[id];
+            // "live" = its heartbeat keeps changing (does not depend on both phones having the same clock)
+            if(!sn){SEEN[id]={hb:c.hb,t:(now-c.hb<60000)?Math.min(now,c.hb):c.hb};}
+            else if(sn.hb!==c.hb){sn.hb=c.hb;sn.t=now;}
+            c.hb=SEEN[id].t;o[id]=c;
+          });
+          Object.keys(SEEN).forEach(k=>{if(!o[k])delete SEEN[k];});
+          return o;
         }
         const url=BASE+"/liveCams/"+encodeURIComponent(p[1]);
         if(method==="DELETE"){await fsReq(url,"DELETE");return null;}
@@ -3622,7 +3632,7 @@ if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",
           const f={id:fsS(body.id),hb:fsI(body.hb),frame:fsS(body.frame||"")};
           if(body.lat!=null&&isFinite(body.lat))f.lat={doubleValue:+body.lat};
           if(body.lng!=null&&isFinite(body.lng))f.lng={doubleValue:+body.lng};
-          await fsReq(url,"PATCH",{fields:f});return null;
+          const r=await fsReq(url,"PATCH",{fields:f});liveStat(r.ok?"ok":r.status);return null;
         }
         return null;
       }
@@ -3677,6 +3687,192 @@ if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",
     b.style.display=on?"":"none";
     if(!on&&rec&&rec.state==="recording")rec.stop();
   },1000);
+
+
+  // ---------- status line on the camera screen: shows if YOUR stream really reaches others ----------
+  function liveStat(code){
+    let e=$("liveStat");
+    if(!e){const a=$("camStatus");if(!a)return;e=document.createElement("p");e.id="liveStat";e.className="cs-note";e.style.fontWeight="700";a.insertAdjacentElement("afterend",e);}
+    if(code==="ok"){e.style.color="#16a34a";e.textContent="\uD83D\uDCE1 You are LIVE: others (and the admin) can watch you now.";}
+    else if(code==="off"){e.textContent="";}
+    else if(code===403||code===401){e.style.color="#dc2626";e.textContent="\u274C Live stream is blocked ("+code+"). Publish the Firestore rules for liveCams and liveSig (Firebase > Firestore > Rules), then start the camera again.";}
+    else{e.style.color="#dc2626";e.textContent="\u274C Live stream could not be sent (error "+code+"). Check the internet connection.";}
+  }
+  setInterval(()=>{if(typeof camStream==="undefined"||!camStream)liveStat("off");},2000);
+
+  // ---------- admin alert: "someone started a live camera" + watch it ----------
+  const ICE={iceServers:[{urls:"stun:stun.l.google.com:19302"},{urls:"stun:stun1.l.google.com:19302"},{urls:["turn:openrelay.metered.ca:80","turn:openrelay.metered.ca:443","turn:openrelay.metered.ca:443?transport=tcp"],username:"openrelayproject",credential:"openrelayproject"}]};
+  const gathered=pc=>new Promise(res=>{if(pc.iceGatheringState==="complete")return res();const t=setTimeout(res,4000);pc.addEventListener("icegatheringstatechange",()=>{if(pc.iceGatheringState==="complete"){clearTimeout(t);res();}});});
+  const aCss=document.createElement("style");
+  aCss.textContent=
+   "#csLiveBar{position:fixed;left:.6rem;right:.6rem;top:.6rem;z-index:9500;display:none;background:#b91c1c;color:#fff;border-radius:16px;padding:.8rem .9rem;box-shadow:0 10px 30px rgba(0,0,0,.35);align-items:center;gap:.6rem;flex-wrap:wrap}"+
+   "#csLiveBar b{flex:1 1 180px}#csLiveBar button{border:0;border-radius:10px;padding:.55rem .9rem;font-weight:800;cursor:pointer}"+
+   "#csLivePill{position:fixed;right:.7rem;bottom:calc(var(--tab,66px) + 14px);z-index:9400;display:none;background:#dc2626;color:#fff;border:0;border-radius:999px;padding:.6rem 1rem;font-weight:800;box-shadow:0 6px 20px rgba(0,0,0,.35);cursor:pointer;animation:csPulse 1.4s infinite}"+
+   "@keyframes csPulse{0%,100%{transform:scale(1)}50%{transform:scale(1.07)}}"+
+   "#csPlayer{position:fixed;inset:0;z-index:9800;background:rgba(0,0,0,.85);display:none;align-items:center;justify-content:center;padding:.8rem}"+
+   "#csPlayer .pc{background:#101010;color:#fff;border-radius:18px;max-width:560px;width:100%;padding:.8rem}"+
+   "#csPlayer video,#csPlayer img{width:100%;max-height:62vh;object-fit:contain;background:#000;border-radius:12px;display:block}"+
+   "#csPlayer .row{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.6rem;align-items:center}#csPlayer select{flex:1;min-width:140px}";
+  document.head.appendChild(aCss);
+  const bar=document.createElement("div");bar.id="csLiveBar";
+  bar.innerHTML='<b id="csLiveTxt">\uD83D\uDD34 A live camera has started</b><button type="button" id="csLiveGo" style="background:#fff;color:#b91c1c">Watch live</button><button type="button" id="csLiveX" style="background:rgba(255,255,255,.2);color:#fff">\u2715</button>';
+  const pill=document.createElement("button");pill.type="button";pill.id="csLivePill";
+  const pl=document.createElement("div");pl.id="csPlayer";
+  pl.innerHTML='<div class="pc"><div id="plSt" style="font-weight:700;margin-bottom:.5rem">Connecting\u2026</div><video id="plVid" playsinline autoplay muted controls style="display:none"></video><img id="plImg" alt="live frame"><div class="row"><select id="plSel"></select><button type="button" class="btn btn-ghost" id="plClose" style="color:#fff;border-color:#fff">Close</button></div><p id="plLoc" style="font-size:.85rem;opacity:.8;margin-top:.4rem"></p></div>';
+  document.body.appendChild(bar);document.body.appendChild(pill);document.body.appendChild(pl);
+
+  let CAMS=[],known=new Set(),cur=null,curPc=null,curTok=0;
+  function beep(){try{const A=window.AudioContext||window.webkitAudioContext,c=new A(),o=c.createOscillator(),g=c.createGain();o.type="square";o.frequency.value=880;g.gain.value=.15;o.connect(g);g.connect(c.destination);o.start();setTimeout(()=>{o.frequency.value=660;},180);setTimeout(()=>{o.stop();c.close();},420);}catch(e){}}
+  function notifyLive(c){
+    $("csLiveTxt").textContent="\uD83D\uDD34 Live camera started"+(c.lat!=null?" near "+(+c.lat).toFixed(3)+", "+(+c.lng).toFixed(3):"")+". Tap Watch live.";
+    bar.style.display="flex";bar.dataset.id=c.id;beep();
+    try{if(navigator.vibrate)navigator.vibrate([300,150,300]);}catch(e){}
+    try{if("Notification" in window&&Notification.permission==="granted"&&document.hidden){const n=new Notification("Clean Sindh: live camera started",{body:"Someone is streaming garbage live. Open the app to watch.",tag:"cs-live"});n.onclick=()=>{window.focus();openPlayer(c.id);n.close();};}}catch(e){}
+  }
+  function fillSel(){
+    const s=$("plSel");s.innerHTML=CAMS.map((c,i)=>'<option value="'+esc(c.id)+'">Camera '+(i+1)+(c.lat!=null?" \u2022 "+(+c.lat).toFixed(4)+", "+(+c.lng).toFixed(4):"")+'</option>').join("");
+    if(cur)s.value=cur;
+  }
+  let scan=async function(){
+    if(!staffOn())return;
+    const all=await window.__csLive("/livecams")||{},now=Date.now();
+    CAMS=Object.values(all).filter(c=>c&&c.id&&now-c.hb<30000);
+    CAMS.forEach(c=>{if(!known.has(c.id)){known.add(c.id);notifyLive(c);}});
+    known.forEach(id=>{if(!CAMS.find(c=>c.id===id))known.delete(id);});
+    if(!CAMS.length){bar.style.display="none";pill.style.display="none";}
+    else{pill.style.display="block";pill.textContent="\uD83D\uDD34 "+CAMS.length+" live \u2022 Watch";}
+    if(pl.style.display==="flex"){
+      fillSel();const c=CAMS.find(x=>x.id===cur);
+      if(!c){$("plSt").textContent="This live camera has ended.";}
+      else{if(c.frame&&$("plImg").style.display!=="none")$("plImg").src=c.frame;$("plLoc").textContent=c.lat!=null?"GPS "+(+c.lat).toFixed(5)+", "+(+c.lng).toFixed(5):"";}
+    }
+  };
+  function closeConn(){curTok++;if(curPc){try{curPc.close();}catch(e){}curPc=null;}const v=$("plVid");v.pause();v.srcObject=null;v.style.display="none";$("plImg").style.display="block";}
+  async function openPlayer(id){
+    id=id||(CAMS[0]&&CAMS[0].id);if(!id){alert("No live camera right now.");return;}
+    cur=id;bar.style.display="none";pl.style.display="flex";fillSel();closeConn();
+    const c=CAMS.find(x=>x.id===id);if(c&&c.frame)$("plImg").src=c.frame;
+    const tok=curTok,st=$("plSt");st.textContent="Connecting to the live video\u2026";
+    try{
+      const pc=curPc=new RTCPeerConnection(ICE),vid="a"+Date.now()+Math.random().toString(36).slice(2,5);
+      pc.addTransceiver("video",{direction:"recvonly"});
+      pc.ontrack=e=>{if(tok!==curTok)return;const v=$("plVid");v.srcObject=e.streams[0];v.style.display="block";$("plImg").style.display="none";v.play().catch(()=>{});st.textContent="\uD83D\uDD34 LIVE video";};
+      await pc.setLocalDescription(await pc.createOffer());await gathered(pc);
+      await window.__csLive("/livesig/"+id+"/"+vid+"/offer","PUT",pc.localDescription.sdp);
+      for(let i=0;i<30;i++){
+        await new Promise(r=>setTimeout(r,1500));if(tok!==curTok)return;
+        const a=await window.__csLive("/livesig/"+id+"/"+vid+"/answer");
+        if(a){await pc.setRemoteDescription({type:"answer",sdp:a});return;}
+      }
+      st.textContent="Video could not connect on this network. The picture below refreshes every few seconds.";
+    }catch(e){if(tok===curTok)st.textContent="Video could not connect. The picture below refreshes every few seconds.";}
+  }
+  $("csLiveGo").onclick=()=>openPlayer(bar.dataset.id);
+  $("csLiveX").onclick=()=>{bar.style.display="none";};
+  pill.onclick=()=>openPlayer();
+  $("plClose").onclick=()=>{closeConn();cur=null;pl.style.display="none";};
+  $("plSel").onchange=e=>openPlayer(e.target.value);
+  setInterval(()=>scan(),7000);setTimeout(()=>scan(),2500);
+
+  // ====== LIVE DASHBOARD for Admin + Municipal: live cameras, live photos (with status), new-report alerts ======
+  const lvCss=document.createElement("style");
+  lvCss.textContent=
+   ".lv-panel h3{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}.lv-n{background:#dc2626;color:#fff;border-radius:999px;padding:.05rem .6rem;font-size:.8rem}"+
+   ".lv-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:.8rem;margin:.7rem 0 1.1rem}"+
+   ".lv-c{border:1px solid var(--line);border-radius:14px;overflow:hidden;background:#fff}.lv-c img{width:100%;height:150px;object-fit:cover;display:block;background:#000}"+
+   ".lv-b{padding:.55rem .65rem;font-size:.85rem}.lv-b .row2{display:flex;gap:.35rem;flex-wrap:wrap;margin-top:.45rem}"+
+   ".lv-live{position:absolute;left:.5rem;top:.5rem;background:#dc2626;color:#fff;font-weight:800;font-size:.72rem;border-radius:6px;padding:.1rem .45rem}"+
+   ".lv-wrap{position:relative}"+
+   "#csToast{position:fixed;left:.6rem;right:.6rem;bottom:calc(var(--tab,66px) + 70px);z-index:9600;display:none;background:#0b5132;color:#fff;border-radius:14px;padding:.7rem .9rem;box-shadow:0 10px 30px rgba(0,0,0,.35);align-items:center;gap:.7rem}"+
+   "#csToast img{width:52px;height:52px;object-fit:cover;border-radius:8px;display:none}#csToast b{flex:1}#csToast button{border:0;border-radius:10px;padding:.5rem .8rem;font-weight:800;cursor:pointer}";
+  document.head.appendChild(lvCss);
+  const toast=document.createElement("div");toast.id="csToast";
+  toast.innerHTML='<img id="csToastImg" alt=""><b id="csToastTxt"></b><button type="button" id="csToastGo" style="background:#fff;color:#0b5132">Open</button><button type="button" id="csToastX" style="background:rgba(255,255,255,.2);color:#fff">\u2715</button>';
+  document.body.appendChild(toast);
+  let toastGo="admin",toastTm=null;
+  function showToast(txt,img,go){
+    $("csToastTxt").textContent=txt;const i=$("csToastImg");if(img){i.src=img;i.style.display="block";}else i.style.display="none";
+    toastGo=go||"admin";toast.style.display="flex";beep();try{if(navigator.vibrate)navigator.vibrate([200,100,200]);}catch(e){}
+    clearTimeout(toastTm);toastTm=setTimeout(()=>{toast.style.display="none";},12000);
+  }
+  $("csToastGo").onclick=()=>{toast.style.display="none";const m=$("municipal");showScreen(toastGo);};
+  $("csToastX").onclick=()=>{toast.style.display="none";};
+
+  // the old per-admin camera box is replaced by the panel below
+  (function(){const old=$("liveCams");if(old)old.remove();})();
+  function mkPanel(id){
+    const sec=$(id);if(!sec||sec.querySelector(".lv-panel"))return;
+    const d=document.createElement("div");d.className="card lv-panel";d.dataset.for=id;
+    const head=sec.querySelector(".page-head");(head?head.insertAdjacentElement("afterend",d):sec.prepend(d));
+  }
+  mkPanel("admin");mkPanel("municipal");
+  const ago=t=>{const s=Math.max(0,(Date.now()-t)/1000|0);return s<60?s+" s ago":s<3600?(s/60|0)+" min ago":s<86400?(s/3600|0)+" h ago":(s/86400|0)+" d ago";};
+  let SIGHT=[],seenSight=null,seenRep=null;
+  async function fetchSights(){
+    if(!staffOn())return;
+    try{
+      const r=await fsReq(BASE+":runQuery","POST",{structuredQuery:{from:[{collectionId:"sightings"}],orderBy:[{field:{fieldPath:"ts"},direction:"DESCENDING"}],limit:24}});
+      if(!r.ok){SIGHT=null;return;}
+      const j=await r.json();
+      SIGHT=(j||[]).filter(x=>x&&x.document).map(x=>{const f=dec(x.document.fields);f.id=x.document.name.split("/").pop();return f;});
+      if(seenSight===null)seenSight=new Set(SIGHT.map(x=>x.id));
+      else SIGHT.forEach(x=>{if(!seenSight.has(x.id)){seenSight.add(x.id);showToast("\uD83D\uDCF8 New live photo taken"+(x.lat!=null?" ("+(+x.lat).toFixed(3)+", "+(+x.lng).toFixed(3)+")":""),x.img,"admin");}});
+    }catch(e){}
+  }
+  const STN={pending:"Pending",inprogress:"In progress",resolved:"Done"};
+  window.csSightStatus=async function(id,st){
+    const x=(SIGHT||[]).find(z=>z.id===id);if(x)x.status=st;renderPanels();
+    try{await fsReq(BASE+"/sightings/"+encodeURIComponent(id)+"?updateMask.fieldPaths=status&updateMask.fieldPaths=upd","PATCH",{fields:{status:fsS(st),upd:fsI(Date.now())}});}catch(e){}
+  };
+  function renderPanels(){
+    if(!staffOn())return;
+    document.querySelectorAll(".lv-panel").forEach(p=>{
+      const sec=$(p.dataset.for);if(!sec||!sec.classList.contains("active"))return;
+      const cams=CAMS.map((c,i)=>'<div class="lv-c"><div class="lv-wrap"><img alt="live" src="'+(c.frame?esc(c.frame):"")+'"><span class="lv-live">\uD83D\uDD34 LIVE</span></div><div class="lv-b"><b>Camera '+(i+1)+'</b><br><span class="muted">'+(c.lat!=null?'GPS '+(+c.lat).toFixed(5)+', '+(+c.lng).toFixed(5):'No GPS yet')+'</span><div class="row2"><button type="button" class="btn small" onclick="csWatch(\''+esc(c.id)+'\')">Watch live video</button>'+(c.lat!=null?'<a class="btn btn-ghost small" target="_blank" rel="noopener" href="https://www.google.com/maps?q='+(+c.lat)+','+(+c.lng)+'">Map</a>':'')+'</div></div></div>').join("");
+      let sg;
+      if(SIGHT===null)sg='<p class="muted">Live photos cannot be read. Publish the Firestore rules for <b>sightings</b>.</p>';
+      else sg=SIGHT.length?'<div class="lv-grid">'+SIGHT.map(x=>'<div class="lv-c"><img alt="live photo" src="'+esc(x.img||"")+'"><div class="lv-b"><b>'+esc(STN[x.status]||"Pending")+'</b> \u2022 '+ago(x.ts)+'<br><span class="muted">'+(x.lat!=null?(+x.lat).toFixed(5)+', '+(+x.lng).toFixed(5):'')+(x.by?' \u2022 '+esc(x.by):'')+'</span><div class="row2"><button type="button" class="small btn-pending" onclick="csSightStatus(\''+esc(x.id)+'\',\'pending\')">Pending</button><button type="button" class="small btn-progress" onclick="csSightStatus(\''+esc(x.id)+'\',\'inprogress\')">In Progress</button><button type="button" class="small btn-resolved" onclick="csSightStatus(\''+esc(x.id)+'\',\'resolved\')">Done</button></div></div></div>').join("")+'</div>':'<p class="muted">No live photos yet.</p>';
+      p.innerHTML='<h3>\uD83D\uDD34 Live now <span class="lv-n">'+CAMS.length+'</span></h3>'+(CAMS.length?'<div class="lv-grid">'+cams+'</div>':'<p class="muted" style="margin:.5rem 0 1rem">Nobody is live right now. This panel and an alert pop up the moment someone starts a live camera.</p>')+'<h3>\uD83D\uDCF8 Photos taken live</h3>'+sg;
+    });
+  }
+  window.csWatch=id=>openPlayer(id);
+  // wrap scan so the panels refresh with it
+  const _scan=scan;
+  scan=async function(){await _scan();await fetchSights();renderPanels();};
+  // push every new live photo to Firestore so the admin sees it
+  async function pushSighting(s){
+    try{
+      const f={ts:fsI(s.ts||s.id),status:fsS("pending"),img:fsS(s.img||""),by:fsS(US?US.email:"")};
+      if(isFinite(s.lat))f.lat={doubleValue:+s.lat};if(isFinite(s.lng))f.lng={doubleValue:+s.lng};
+      await fsReq(BASE+"/sightings/"+encodeURIComponent(s.id),"PATCH",{fields:f});
+    }catch(e){}
+  }
+  const _saveLive=saveLive;
+  saveLive=function(a){
+    let had=new Set();try{getLive().forEach(x=>had.add(x.id));}catch(e){}
+    const r=_saveLive.apply(this,arguments);
+    try{(a||[]).filter(x=>x&&!had.has(x.id)&&x.img).forEach(pushSighting);}catch(e){}
+    return r;
+  };
+  // new report alert (any photo report that reaches this device while staff are logged in)
+  function checkReports(){
+    if(!staffOn())return;
+    let a=[];try{a=getReports()||[];}catch(e){}
+    if(seenRep===null){seenRep=new Set(a.map(r=>r.id));return;}
+    a.forEach(r=>{if(!seenRep.has(r.id)){seenRep.add(r.id);showToast("\uD83D\uDCCB New report: "+(r.location||r.city||"Sindh"),r.photo||"","municipal");}});
+  }
+  // fast refresh so reports + status changes appear live
+  setInterval(()=>{
+    if(document.hidden||typeof cpull!=="function")return;
+    const on=id=>{const e=$(id);return !!(e&&e.classList.contains("active"));};
+    if(staffOn()){if(on("admin")||on("municipal")||on("pending")||on("inprogress")||on("resolved"))cpull();checkReports();}
+    else if(loggedIn()&&(on("track")||on("pending")||on("inprogress")||on("resolved")))cpull();
+  },6000);
+  const _show2=showScreen;
+  showScreen=function(id){const r=_show2.apply(this,arguments);if(staffOn()&&(id==="admin"||id==="municipal")){try{cpull();}catch(e){}renderPanels();scan();}return r;};
+
+  // ask once for permission to show phone notifications (needs a tap)
+  document.addEventListener("click",function ask(){document.removeEventListener("click",ask);try{if(staffOn()&&"Notification" in window&&Notification.permission==="default")Notification.requestPermission();}catch(e){}},{once:true});
 
   // ---------- start ----------
   let started=false;
