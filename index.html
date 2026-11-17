@@ -1860,7 +1860,7 @@ async function cpull(){
     const news=mc?await fsQuery("reports","createdAt","GREATER_THAN",mc,"ASCENDING",60):await fsQuery("reports","createdAt","GREATER_THAN",0,"DESCENDING",staff?100:40);
     const chg=mu?await fsQuery("reports","upd","GREATER_THAN",mu,"ASCENDING",100,FS_PUB_LITE):[];
     const toRep=(id,f)=>cleanR({id:Number(id),city:f.city||"",location:f.area||"",description:f.description||"",lat:f.lat,lng:f.lng,photo:f.photo||"",status:f.status,ts:f.createdAt,date:new Date(f.createdAt||Number(id)).toLocaleString(),upd:f.upd||0,resolvedAt:f.resolvedAt,resolvedPhoto:f.resolvedPhoto||"",cs:1});
-    news.forEach(d=>{const c=toRep(d.id,d.f),l=m.get(c.id);if(!l)m.set(c.id,c);else if(l.cs===0)l.cs=1;mc=Math.max(mc,d.f.createdAt||0);mu=Math.max(mu,d.f.upd||0);});
+    news.forEach(d=>{const c=toRep(d.id,d.f),l=m.get(c.id);if(!l)m.set(c.id,c);else{if(l.cs===0)l.cs=1;if(!l.photo&&c.photo)l.photo=c.photo;}mc=Math.max(mc,d.f.createdAt||0);mu=Math.max(mu,d.f.upd||0);});
     chg.forEach(d=>{
       const c=toRep(d.id,d.f),l=m.get(c.id);mu=Math.max(mu,d.f.upd||0);
       if(!l){m.set(c.id,c);return;}
@@ -3861,6 +3861,36 @@ if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",
     if(seenRep===null){seenRep=new Set(a.map(r=>r.id));return;}
     a.forEach(r=>{if(!seenRep.has(r.id)){seenRep.add(r.id);showToast("\uD83D\uDCCB New report: "+(r.location||r.city||"Sindh"),r.photo||"","municipal");}});
   }
+
+  // ---------- photos missing on the admin dashboard: fetch them straight from the report document ----------
+  const noPh=new Set(),phTry={};let healing=false;
+  async function healPhotos(){
+    if(healing||!staffOn()||(typeof fsPulling!=="undefined"&&fsPulling))return;
+    let A;try{A=getReports()||[];}catch(e){return;}
+    const need=A.filter(r=>r&&r.cs===1&&!r.photo&&r.id&&!noPh.has(r.id)).sort((x,y)=>(y.id||0)-(x.id||0)).slice(0,6);
+    if(!need.length)return;
+    healing=true;let got=0;
+    try{
+      for(const r of need){
+        try{
+          const res=await fsReq(BASE+"/reports/"+encodeURIComponent(r.id));
+          if(!res.ok){phTry[r.id]=(phTry[r.id]||0)+1;if(phTry[r.id]>=3)noPh.add(r.id);continue;}
+          const f=dec((await res.json()).fields||{});
+          if(f.photo){r.photo=f.photo;got++;}else noPh.add(r.id);
+        }catch(e){}
+      }
+      if(got){
+        // re-read the list (it may have changed meanwhile) and add the photos we fetched
+        let B=getReports()||[];const by=new Map(need.map(r=>[r.id,r.photo]));
+        B.forEach(r=>{if(!r.photo&&by.get(r.id))r.photo=by.get(r.id);});
+        try{saveReports(B);}catch(e){need.forEach(r=>noPh.add(r.id));}   // phone storage full: stop retrying
+        try{refreshAll();}catch(e){}
+      }
+    }finally{healing=false;}
+  }
+  const _cpull=cpull;
+  cpull=async function(){const r=await _cpull.apply(this,arguments);try{healPhotos();}catch(e){}return r;};
+
   // fast refresh so reports + status changes appear live
   setInterval(()=>{
     if(document.hidden||typeof cpull!=="function")return;
